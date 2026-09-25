@@ -443,6 +443,16 @@ class VCFGDecode(implicit val p: Parameters) extends DecodeConstants
     VSETVL   -> List(Y,N,N,N,N,N,Y,Y,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N))
 }
 
+class MatrixCFGDecode(implicit val p: Parameters) extends DecodeConstants
+{
+  import MatrixInstructions._
+  // Xsfmm sf.vsettn/sf.vsettm/sf.vsettk: read rs1, write rd (like vsetvli)
+  val table: Array[(BitPat, List[BitPat])] = Array(
+    SF_VSETTN -> List(Y,N,N,N,N,N,N,Y,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+    SF_VSETTM -> List(Y,N,N,N,N,N,N,Y,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+    SF_VSETTK -> List(Y,N,N,N,N,N,N,Y,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N))
+}
+
 class ZbaDecode(implicit val p: Parameters) extends DecodeConstants
 {
   val table: Array[(BitPat, List[BitPat])] = Array(

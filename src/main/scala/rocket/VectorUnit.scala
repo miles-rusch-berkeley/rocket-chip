@@ -17,7 +17,9 @@ case class RocketCoreVectorParams(
   decoder: Parameters => RocketVectorDecoder,
   useDCache: Boolean,
   issueVConfig: Boolean,
-  vExts: Seq[String]
+  vExts: Seq[String],
+  matrixTE: Int = 0,                    // Xsfmm/VME tile edge (TEW=32); 0 = none
+  matrixTypes: Seq[(Int, Int)] = Nil    // supported (SEW, TWIDEN) matrix configs
 )
 
 class VectorCoreIO(implicit p: Parameters) extends CoreBundle()(p) {

@@ -75,6 +75,10 @@ trait CoreParams {
   def vExts: Seq[String] = Nil
   def hasV: Boolean = vLen >= 128 && eLen >= 64 && vfLen >= 64
   def vMemDataBits: Int = 0
+  /** Matrix (Xsfmm/VME) tile edge TE for TEW=32 tiles; 0 = no matrix unit. */
+  def matrixTE: Int = 0
+  /** Supported (SEW, TWIDEN) matrix configurations. */
+  def matrixTypes: Seq[(Int, Int)] = Nil
 
   def useBitmanip = useZba && useZbb && useZbs
 }
@@ -120,6 +124,9 @@ trait HasCoreParameters extends HasTileParameters {
   def vfLen = coreParams.vfLen
   def vMemDataBits = if (usingVector) coreParams.vMemDataBits else 0
   def maxVLMax = vLen
+  def matrixTE = coreParams.matrixTE
+  def matrixTypes = coreParams.matrixTypes
+  def usingMatrix = usingVector && matrixTE > 0
 
   if (usingVector) {
     require(isPow2(vLen), s"vLen ($vLen) must be a power of 2")
@@ -127,6 +134,10 @@ trait HasCoreParameters extends HasTileParameters {
     require(eLen == 32 || eLen == 64)
     require(vfLen <= eLen)
     require(!coreParams.vfh || (vfLen >= 32 && coreParams.minFLen <= 16))
+    if (matrixTE > 0) {
+      require(isPow2(matrixTE) && matrixTE >= 4 && matrixTE <= vLen / 4,
+        s"matrix TE ($matrixTE) must be a power of 2 in [4, vLen/4]")
+    }
   }
 
   if (coreParams.useVM) {
