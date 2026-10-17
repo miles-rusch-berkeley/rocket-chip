@@ -8,21 +8,34 @@ import org.chipsalliance.cde.config.Parameters
 import freechips.rocketchip.tile._
 
 /** Matrix-configuration support for the RISC-V vector-matrix extension (VME),
-  * following the SiFive Xsfmm v0.6.6 encodings and semantics.
+  * following real Zvt encodings and semantics (riscv-isa-sim commit 72958551,
+  * "Add Zvt support"; see vector_unit.cc's msetmtype()/msettn()/msettm()/msettk()).
   *
-  * The matrix unit adds tm, tk and vtwiden fields to vtype (see [[VType]]),
-  * uses vl as tn, and adds three configuration instructions:
+  * The matrix unit adds a dedicated `mtype` CSR (widen, tk, tm; see
+  * [[CSRs.mtype]]) instead of embedding these in vtype, and four
+  * configuration instructions:
   *
-  *   sf.vsettn rd, rs1   // rd = tn/vl = min(rs1, LMUL*EVE, ETE)
-  *   sf.vsettm rd, rs1   // rd = tm    = min(rs1, LMUL*EVE, ETE)
-  *   sf.vsettk rd, rs1   // rd = tk    = min(rs1, KMAX)
+  *   sf.msetmtype rd, rs1, rs2  // rs1[1:0] = widen code (0/1/2/3 -> widen 0/1/2/4)
+  *                              // rs2 = vsew<<3 | altfmt<<8; rd/vl is clobbered
+  *                              // (see MatrixConfig.msetmtypeNewType)
+  *   sf.msettn rd, rs1          // rd = tn/vl = min(rs1, LMUL*EVE, ETE)
+  *   sf.msettm rd, rs1          // rd = tm    = min(rs1, LMUL*EVE, ETE)
+  *   sf.msettk rd, rs1          // rd = tk    = min(rs1, KMAX)
   *
-  * sf.vsettnt is an assembler alias of vsetvli with vtwiden != 0.
+  * Internally this RTL still carries tm/tk/widen embedded in the [[VType]]
+  * bundle's otherwise-reserved bits (see its comment) -- that's purely an
+  * implementation detail of how Saturn's pipeline threads matrix config
+  * alongside vconfig; sf.msetmtype's execution (RocketCore.scala) packs its
+  * rs1/rs2 operands into that same internal immediate layout before handing
+  * them to VType.fromUInt, and the mtype CSR (CSR.scala) is synthesized from
+  * it on read, so none of this leaks to software, which only ever observes
+  * the real-Zvt-shaped vtype/mtype CSRs and instruction semantics.
   */
 object MatrixInstructions {
-  def SF_VSETTN = BitPat("b1000010_00000_?????_111_?????_1010111")
-  def SF_VSETTM = BitPat("b1000010_00001_?????_111_?????_1010111")
-  def SF_VSETTK = BitPat("b1000010_00010_?????_111_?????_1010111")
+  def SF_MSETMTYPE = BitPat("b1000010_?????_?????_111_?????_1010111")
+  def SF_VSETTN = BitPat("b1000100_00000_?????_111_?????_1010111")
+  def SF_VSETTM = BitPat("b1000100_00001_?????_111_?????_1010111")
+  def SF_VSETTK = BitPat("b1000100_00010_?????_111_?????_1010111")
   def cfg = Seq(SF_VSETTN, SF_VSETTM, SF_VSETTK)
 }
 
@@ -61,6 +74,23 @@ object MatrixConfig {
 
   /** Returns true if inst is one of sf.vsettn/sf.vsettm/sf.vsettk. */
   def isCfg(inst: UInt): Bool = MatrixInstructions.cfg.map(_ === inst).reduce(_ || _)
+
+  /** Returns true if inst is sf.msetmtype. */
+  def isMsetmtype(inst: UInt): Bool = MatrixInstructions.SF_MSETMTYPE === inst
+
+  /** sf.msetmtype rs1/rs2 -> the internal vtype-embedded immediate VType.fromUInt
+    * expects (see [[VType]]'s field comment): rs1[1:0] is the same vtwiden code
+    * (0/1/2/3) the old vsetvli-embedded sf.vsettnt immediate used at bits[10:9];
+    * rs2 is passed through as-is (vsew<<3 | altfmt<<8 at bits[8:0]). tm/tk (bits
+    * above 10) are left 0 here -- a configured sf.msetmtype always clears them
+    * (matching real Zvt), and any nonzero tm/tk come from the sf.msettm/sf.msettk
+    * that must follow.
+    */
+  def msetmtypeNewType(rs1: UInt, rs2: UInt): UInt = (rs1(1, 0) << 9) | rs2(8, 0)
+
+  /** Decodes the vtwiden code (0/1/2/3, as stored in VType) to the widen value
+    * (0/1/2/4) the real `mtype` CSR reports -- the inverse of vtwidenEncoding. */
+  def widenDecode(vtwiden: UInt): UInt = MuxLookup(vtwiden, 0.U)(Seq(1.U -> 1.U, 2.U -> 2.U, 3.U -> 4.U))
 
   /** Computes the new vconfig and rd value for sf.vsettn/m/k.
     * `cur` must be the vconfig as seen by this instruction (with older
