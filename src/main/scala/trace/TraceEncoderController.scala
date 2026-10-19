@@ -37,6 +37,10 @@ class TraceEncoderControlInterface() extends Bundle {
   // exactly as a smaller build would. It can only ever emulate smaller -- the
   // physical can_accept bound remains a hard floor.
   val drop_threshold = UInt(32.W)
+  // Periodic sync interval in trace bytes; 0 (reset) disables it. After at least
+  // this many bytes the encoder emits a Sync Periodic checkpoint, so a trace that
+  // wrapped in a ring buffer can be decoded from the first checkpoint it holds.
+  val sync_interval = UInt(32.W)
 }
 
 class TraceEncoderPerformanceInterface() extends Bundle {
@@ -106,6 +110,9 @@ class TraceEncoderController(addr: BigInt, beatBytes: Int, hartId: Int)(implicit
 
     val trace_drop_thresh = RegInit(0.U(32.W))
     io.control.drop_threshold := trace_drop_thresh
+
+    val trace_sync_interval = RegInit(0.U(32.W))
+    io.control.sync_interval := trace_sync_interval
 
     def traceEncoderControlRegWrite(valid: Bool, bits: UInt): Bool = {
       control_reg_write_valid := valid
@@ -216,6 +223,11 @@ class TraceEncoderController(addr: BigInt, beatBytes: Int, hartId: Int)(implicit
             RegFieldDesc("dropThreshold",
               "Lossy drop threshold in queue entries; 0 = physical bound. " +
               "Lower values emulate a shallower queue. Reads back effective."))
+        ),
+        0x60 -> Seq(
+          RegField(32, trace_sync_interval,
+            RegFieldDesc("syncInterval",
+              "Periodic sync interval in trace bytes; 0 = off. Write before enable."))
         )
       ):_*
     )
