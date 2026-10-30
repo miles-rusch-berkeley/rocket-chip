@@ -446,11 +446,13 @@ class VCFGDecode(implicit val p: Parameters) extends DecodeConstants
 class MatrixCFGDecode(implicit val p: Parameters) extends DecodeConstants
 {
   import MatrixInstructions._
-  // sf.msetmtype: read rs1 AND rs2, write rd (like vsetvl). sf.msettn/m/k:
-  // read rs1, write rd (like vsetvli) -- rs2 is a fixed tn/tm/tk selector
-  // baked into the encoding, not a real operand.
+  // sf.msetmtype: read rs1 AND rs2, write rd (like vsetvl). sf.msetmtypei:
+  // reads neither register (mtwiden/vsew/altfmt are all immediate), write rd
+  // (like vsetivli). sf.msettn/m/k: read rs1, write rd (like vsetvli) -- rs2
+  // is a fixed tn/tm/tk selector baked into the encoding, not a real operand.
   val table: Array[(BitPat, List[BitPat])] = Array(
     SF_MSETMTYPE -> List(Y,N,N,N,N,N,Y,Y,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+    SF_MSETMTYPEI-> List(Y,N,N,N,N,N,N,N,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
     SF_VSETTN -> List(Y,N,N,N,N,N,N,Y,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
     SF_VSETTM -> List(Y,N,N,N,N,N,N,Y,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
     SF_VSETTK -> List(Y,N,N,N,N,N,N,Y,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N))

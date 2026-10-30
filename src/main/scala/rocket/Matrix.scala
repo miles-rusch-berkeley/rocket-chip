@@ -12,12 +12,17 @@ import freechips.rocketchip.tile._
   * "Add Zvt support"; see vector_unit.cc's msetmtype()/msettn()/msettm()/msettk()).
   *
   * The matrix unit adds a dedicated `mtype` CSR (widen, tk, tm; see
-  * [[CSRs.mtype]]) instead of embedding these in vtype, and four
+  * [[CSRs.mtype]]) instead of embedding these in vtype, and five
   * configuration instructions:
   *
   *   sf.msetmtype rd, rs1, rs2  // rs1[1:0] = widen code (0/1/2/3 -> widen 0/1/2/4)
   *                              // rs2 = vsew<<3 | altfmt<<8; rd/vl is clobbered
   *                              // (see MatrixConfig.msetmtypeNewType)
+  *   sf.msetmtypei mtwiden, vsew2, altfmt
+  *                              // immediate form of sf.msetmtype: mtwiden is the
+  *                              // instruction's rs1 field low 2 bits, vsew2/altfmt
+  *                              // are packed into the immediate at bits[24:23]/28
+  *                              // (see MatrixConfig.msetmtypeiNewType)
   *   sf.msettn rd, rs1          // rd = tn/vl = min(rs1, LMUL*EVE, ETE)
   *   sf.msettm rd, rs1          // rd = tm    = min(rs1, LMUL*EVE, ETE)
   *   sf.msettk rd, rs1          // rd = tk    = min(rs1, KMAX)
@@ -33,6 +38,11 @@ import freechips.rocketchip.tile._
   */
 object MatrixInstructions {
   def SF_MSETMTYPE = BitPat("b1000010_?????_?????_111_?????_1010111")
+  // Shares funct7's "100?100" prefix with sf.msettn/m/k (rs2 bit22=1 here vs.
+  // their rs2=00000/00001/00010, all of which have bit22=0), so the two
+  // encoding spaces can't collide. Matches real MATCH/MASK_MSETMTYPEI in
+  // zvt_insn.h bit-for-bit (verified against the instruction that faulted).
+  def SF_MSETMTYPEI = BitPat("b100?100_??100_000??_111_?????_1010111")
   def SF_VSETTN = BitPat("b1000100_00000_?????_111_?????_1010111")
   def SF_VSETTM = BitPat("b1000100_00001_?????_111_?????_1010111")
   def SF_VSETTK = BitPat("b1000100_00010_?????_111_?????_1010111")
@@ -87,6 +97,25 @@ object MatrixConfig {
     * that must follow.
     */
   def msetmtypeNewType(rs1: UInt, rs2: UInt): UInt = (rs1(1, 0) << 9) | rs2(8, 0)
+
+  /** Returns true if inst is sf.msetmtypei. */
+  def isMsetmtypei(inst: UInt): Bool = MatrixInstructions.SF_MSETMTYPEI === inst
+
+  /** sf.msetmtypei packs the same fields sf.msetmtype takes in rs1/rs2 into
+    * immediate bits instead (riscv/insns/msetmtypei.h: `vtype = insn.i_imm()
+    * & 0x118`, i.e. only bits {8,4,3} of the I-immediate survive): bits[16:15]
+    * of the raw instruction are the 2-bit mtwiden code (I-imm bits[1:0], i.e.
+    * the low 2 bits of what would be the rs1 field), bits[24:23] are the
+    * 2-bit SEW code (I-imm bits[4:3]; 0-3 => SEW 8/16/32/64), and bit 28 is
+    * altfmt (I-imm bit[8]). Reconstructs the equivalent rs1/rs2 operands and
+    * reuses msetmtypeNewType so the two instructions can't drift apart.
+    */
+  def msetmtypeiNewType(inst: UInt): UInt = {
+    val mtwiden = inst(16, 15)
+    val vsew2 = inst(24, 23)
+    val altfmt = inst(28)
+    msetmtypeNewType(mtwiden, Cat(altfmt, 0.U(3.W), vsew2, 0.U(3.W)))
+  }
 
   /** Decodes the vtwiden code (0/1/2/3, as stored in VType) to the widen value
     * (0/1/2/4) the real `mtype` CSR reports -- the inverse of vtwidenEncoding. */
