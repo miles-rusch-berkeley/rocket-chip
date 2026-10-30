@@ -327,12 +327,31 @@ object VType {
   def fromUInt(that: UInt, ignore_vill: Boolean = false)(implicit p: Parameters): VType = {
     val res = WireInit(0.U.asTypeOf(new VType))
     val in = that.asTypeOf(new VType)
-    val vill = (in.max_vsew.U < in.vsew) || !in.lmul_ok || in.reserved =/= 0.U || in.vill
+    val minfo = in.matrixInfo
+    // tm/tk live in formerly-reserved vtype bits; without a matrix unit they stay reserved
+    val matrix_fields_nonzero = in.tm =/= 0.U || in.tk =/= 0.U || in.reserved_tk =/= 0.U || in.vtwiden =/= 0.U
+    val base_vill = (in.max_vsew.U < in.vsew) || in.reserved =/= 0.U || in.vill
+    val vill = Mux(in.matrix,
+      base_vill || !minfo.legal || in.reserved_tk =/= 0.U,
+      base_vill || !in.lmul_ok || (!in.usingMatrix.B && matrix_fields_nonzero))
     when (!vill || ignore_vill.B) {
       res := in
       res.vsew := in.vsew(log2Ceil(1 + in.max_vsew) - 1, 0)
+      when (in.matrix) {
+        // Xsfmm: vsew and vtwiden as requested; LMUL, vta and vma are implied
+        res.vlmul_sign := false.B
+        res.vlmul_mag := minfo.lmulMag
+        res.vta := true.B
+        res.vma := true.B
+        res.tm := Mux(in.tm > minfo.maxTn, minfo.maxTn, in.tm)(res.tm.getWidth - 1, 0)
+        res.tk := Mux(in.tk > minfo.kmax, minfo.kmax, in.tk)
+      } .otherwise {
+        res.tm := 0.U
+        res.tk := 0.U
+      }
     }
     res.reserved := 0.U
+    res.reserved_tk := 0.U
     res.vill := vill
     res
   }
@@ -343,7 +362,12 @@ object VType {
 
 class VType(implicit p: Parameters) extends CoreBundle {
   val vill = Bool()
-  val reserved = UInt((xLen - 10).W)
+  val reserved = UInt((xLen - 31).W)
+  // Matrix (Xsfmm/VME) fields, in bits that are reserved in the base V extension
+  val tm = UInt(14.W)          // [29:16]
+  val reserved_tk = UInt(2.W)  // [15:14]
+  val tk = UInt(3.W)           // [13:11]
+  val vtwiden = UInt(2.W)      // [10:9]; 0 = matrix unit not configured
   val altfmt = Bool()
   val vma = Bool()
   val vta = Bool()
@@ -371,7 +395,38 @@ class VType(implicit p: Parameters) extends CoreBundle {
 
     val atLeastVLMax = atLeastMaxVLMax || (avl_lsbs & (-maxVLMax.S >> (this.vsew +& Cat(this.vlmul_sign, ~this.vlmul_mag))).asUInt.andNot((minVLMax-1).U)).orR
     val isZero = vill || useZero
-    Mux(!isZero && atLeastVLMax, vlMax, 0.U) | Mux(!isZero && !atLeastVLMax, avl_lsbs, 0.U)
+    val baseVL = Mux(!isZero && atLeastVLMax, vlMax, 0.U) | Mux(!isZero && !atLeastVLMax, avl_lsbs, 0.U)
+    // Xsfmm: tn = vl = min(AVL, LMUL*EVE, ETE)
+    val maxTn = matrixInfo.maxTn
+    Mux(matrix && baseVL > maxTn, maxTn, baseVL)
+  }
+
+  // ------------------------------------------------------------------
+  // Matrix (Xsfmm/VME) helpers
+
+  /** True when the matrix unit is configured (vtwiden != 0). */
+  def matrix: Bool = vtwiden =/= 0.U
+
+  /** Looks up LMUL, max tm/tn and KMAX for the current (vsew, vtwiden). */
+  def matrixInfo: MatrixVTypeInfo = {
+    val info = Wire(new MatrixVTypeInfo)
+    val types = if (usingMatrix) matrixTypes.filter { case (sew, tw) =>
+      MatrixConfig.kmax(sew, tw) > 0 && sew <= eLen && sew * tw <= eLen
+    } else Nil
+    val sel = types.map { case (sew, tw) =>
+      vsew === MatrixConfig.vsewEncoding(sew).U && vtwiden === MatrixConfig.vtwidenEncoding(tw).U
+    }
+    info.legal := sel.foldLeft(false.B)(_ || _)
+    if (types.isEmpty) {
+      info.lmulMag := 0.U
+      info.maxTn := 0.U
+      info.kmax := 0.U
+    } else {
+      info.lmulMag := Mux1H(sel, types.map { case (sew, tw) => MatrixConfig.lmulLog2(sew, tw, vLen, matrixTE).U(2.W) })
+      info.maxTn := Mux1H(sel, types.map { case (sew, tw) => MatrixConfig.maxTn(sew, tw, vLen, matrixTE).U(info.maxTn.getWidth.W) })
+      info.kmax := Mux1H(sel, types.map { case (sew, tw) => MatrixConfig.kmax(sew, tw).U(3.W) })
+    }
+    info
   }
 }
 
@@ -694,14 +749,27 @@ class CSRFile(
     (usingFPU || usingVector).option(CSRs.fcsr -> read_fcsr)
 
   val read_vcsr = Cat(reg_vxrm.getOrElse(0.U), reg_vxsat.getOrElse(0.U))
+  // Real Zvt's vtype has no matrix fields -- tm/tk/vtwiden live in the separate
+  // mtype CSR below. Internally this RTL still embeds them in VType's otherwise-
+  // reserved bits (see its comment), so mask them out of the ISA-visible vtype
+  // CSR read rather than changing that internal representation.
+  val read_vtype = {
+    val vt = reg_vconfig.get.vtype
+    Cat(vt.vill, 0.U((xLen - 10).W), vt.altfmt, vt.vma, vt.vta, vt.vsew, vt.vlmul_sign, vt.vlmul_mag)
+  }
+  val read_mtype = {
+    val vt = reg_vconfig.get.vtype
+    MatrixConfig.widenDecode(vt.vtwiden) | (vt.tk << 5) | (vt.tm << 10)
+  }
   val vector_csrs = if (!usingVector) LinkedHashMap() else LinkedHashMap[Int,Bits](
     CSRs.vxsat -> reg_vxsat.get,
     CSRs.vxrm -> reg_vxrm.get,
     CSRs.vcsr -> read_vcsr,
     CSRs.vstart -> reg_vstart.get,
-    CSRs.vtype -> reg_vconfig.get.vtype.asUInt,
+    CSRs.vtype -> read_vtype,
     CSRs.vl -> reg_vconfig.get.vl,
-    CSRs.vlenb -> (vLen / 8).U)
+    CSRs.vlenb -> (vLen / 8).U) ++
+    usingMatrix.option(CSRs.mtype -> read_mtype)
 
   read_mapping ++= debug_csrs
   read_mapping ++= nmi_csrs

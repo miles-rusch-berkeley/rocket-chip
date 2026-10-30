@@ -907,6 +907,7 @@ object CSRs {
   val vl = 0xc20
   val vtype = 0xc21
   val vlenb = 0xc22
+  val mtype = 0xc23
   val sstatus = 0x100
   val sedeleg = 0x102
   val sideleg = 0x103

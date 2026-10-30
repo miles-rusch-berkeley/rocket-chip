@@ -78,6 +78,8 @@ case class RocketCoreParams(
   override def vfh = vector.map(_.vfh).getOrElse(false)
   override def vExts = vector.map(_.vExts).getOrElse(Nil)
   override def vMemDataBits = vector.map(_.vMemDataBits).getOrElse(0)
+  override def matrixTE = vector.map(_.matrixTE).getOrElse(0)
+  override def matrixTypes = vector.map(_.matrixTypes).getOrElse(Nil)
   override val customIsaExt = Option.when(haveCease)("xrocket") // CEASE instruction
   override def minFLen: Int = fpu.map(_.minFLen).getOrElse(32)
   override def customCSRs(implicit p: Parameters) = new RocketCustomCSRs
@@ -239,6 +241,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     coreParams.haveCFlush.option(new CFlushDecode(tile.dcache.canSupportCFlushLine)) ++:
     rocketParams.haveCease.option(new CeaseDecode) ++:
     usingVector.option(new VCFGDecode) ++:
+    usingMatrix.option(new MatrixCFGDecode) ++:
     (if (coreParams.useZba) new ZbaDecode +: (xLen > 32).option(new Zba64Decode).toSeq else Nil) ++:
     (if (coreParams.useZbb) Seq(new ZbbDecode, if (xLen == 32) new Zbb32Decode else new Zbb64Decode) else Nil) ++:
     coreParams.useZbs.option(new ZbsDecode) ++:
@@ -350,7 +353,8 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val id_csr_ren = id_ctrl.csr.isOneOf(CSR.S, CSR.C) && id_expanded_inst(0).rs1 === 0.U
   val id_csr = Mux(id_system_insn && id_ctrl.mem, CSR.N, Mux(id_csr_ren, CSR.R, id_ctrl.csr))
   val id_csr_flush = id_system_insn || (id_csr_en && !id_csr_ren && csr.io.decode(0).write_flush)
-  val id_set_vconfig = Seq(Instructions.VSETVLI, Instructions.VSETIVLI, Instructions.VSETVL).map(_ === id_inst(0)).orR && usingVector.B
+  val id_set_vconfig = (Seq(Instructions.VSETVLI, Instructions.VSETIVLI, Instructions.VSETVL).map(_ === id_inst(0)).orR && usingVector.B) ||
+    ((MatrixConfig.isCfg(id_inst(0)) || MatrixConfig.isMsetmtype(id_inst(0)) || MatrixConfig.isMsetmtypei(id_inst(0))) && usingMatrix.B)
 
   id_ctrl.vec := false.B
   if (usingVector) {
@@ -492,19 +496,38 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   ) else Nil))
 
   val (ex_new_vl, ex_new_vconfig) = if (usingVector) {
-    val ex_new_vtype = VType.fromUInt(MuxCase(ex_rs(1), Seq(
+    // sf.msetmtype (real Zvt): rs1[1:0] is the vtwiden code, rs2 is vsew<<3|altfmt<<8
+    // -- pack them into the same vtype-embedded immediate layout VType.fromUInt
+    // already expects from vsetvli's own immediate/rs2 forms (see MatrixConfig
+    // .msetmtypeNewType's comment). sf.msetmtypei packs the same fields into
+    // immediate bits instead of registers (see MatrixConfig.msetmtypeiNewType).
+    val ex_is_msetmtype = usingMatrix.B && MatrixConfig.isMsetmtype(ex_reg_inst)
+    val ex_is_msetmtypei = usingMatrix.B && MatrixConfig.isMsetmtypei(ex_reg_inst)
+    val ex_new_vtype_src = MuxCase(ex_rs(1), Seq(
+      ex_is_msetmtype          -> MatrixConfig.msetmtypeNewType(ex_rs(0), ex_rs(1)),
+      ex_is_msetmtypei         -> MatrixConfig.msetmtypeiNewType(ex_reg_inst),
       ex_reg_inst(31,30).andR -> ex_reg_inst(29,20),
-      !ex_reg_inst(31)        -> ex_reg_inst(30,20))))
-    val ex_avl = Mux(ex_ctrl.rxs1,
+      !ex_reg_inst(31)        -> ex_reg_inst(30,20)))
+    val ex_new_vtype = VType.fromUInt(ex_new_vtype_src)
+    val ex_avl = Mux(ex_is_msetmtype || ex_is_msetmtypei, 0.U, Mux(ex_ctrl.rxs1,
       Mux(ex_reg_inst(19,15) === 0.U,
         Mux(ex_reg_inst(11,7) === 0.U, csr.io.vector.get.vconfig.vl, ex_new_vtype.vlMax),
         ex_rs(0)
       ),
-      ex_reg_inst(19,15))
-    val ex_new_vl = ex_new_vtype.vl(ex_avl, csr.io.vector.get.vconfig.vl, false.B, false.B, false.B)
+      ex_reg_inst(19,15)))
+    val ex_std_vl = ex_new_vtype.vl(ex_avl, csr.io.vector.get.vconfig.vl, false.B, false.B, false.B)
     val ex_new_vconfig = Wire(new VConfig)
     ex_new_vconfig.vtype := ex_new_vtype
-    ex_new_vconfig.vl := ex_new_vl
+    ex_new_vconfig.vl := ex_std_vl
+    // sf.msettn/m/k: update tn/tm/tk; rd receives the new value
+    val ex_new_vl = if (usingMatrix) {
+      val ex_is_mcfg = MatrixConfig.isCfg(ex_reg_inst)
+      val (mcfg, mrd) = MatrixConfig.update(ex_reg_inst, ex_rs(0), csr.io.vector.get.vconfig)
+      when (ex_is_mcfg) { ex_new_vconfig := mcfg }
+      Mux(ex_is_mcfg, mrd, ex_std_vl)
+    } else {
+      ex_std_vl
+    }
     (Some(ex_new_vl), Some(ex_new_vconfig))
   } else { (None, None) }
 
